@@ -10,6 +10,7 @@ const OpenRouterChatCompletionBaseResponseSchema = z
     provider: z.string().optional(),
     usage: z
       .object({
+        is_byok: z.boolean().default(false),
         prompt_tokens: z.number(),
         prompt_tokens_details: z
           .object({

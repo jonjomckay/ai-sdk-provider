@@ -31,6 +31,7 @@ describe('OpenRouter Usage Accounting', () => {
       ],
       usage: includeUsage
         ? {
+            is_byok: true,
             prompt_tokens: 10,
             prompt_tokens_details: {
               cached_tokens: 5,
@@ -129,6 +130,7 @@ describe('OpenRouter Usage Accounting', () => {
 
     const usage = openrouterData.usage;
     expect(usage).toMatchObject({
+      isByok: true,
       promptTokens: 10,
       completionTokens: 20,
       totalTokens: 30,
@@ -174,6 +176,7 @@ describe('OpenRouter Usage Accounting', () => {
 
     // Verify that OpenRouter metadata is not included
     expect(result.providerMetadata?.openrouter?.usage).toStrictEqual({
+      isByok: true,
       promptTokens: 10,
       completionTokens: 20,
       totalTokens: 30,
@@ -356,6 +359,7 @@ describe('OpenRouter Usage Accounting', () => {
     // Verify usage.raw contains the original snake_case format from the API
     expect(result.usage.raw).toBeDefined();
     expect(result.usage.raw).toMatchObject({
+      is_byok: true,
       prompt_tokens: 10,
       prompt_tokens_details: {
         cached_tokens: 5,
@@ -478,6 +482,7 @@ describe('OpenRouter Usage Accounting', () => {
           },
         ],
         usage: {
+          is_byok: true,
           prompt_tokens: 100,
           prompt_tokens_details: {
             cached_tokens: 20,

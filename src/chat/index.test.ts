@@ -268,6 +268,7 @@ describe('doGenerate', () => {
         reasoning: 0,
       },
       raw: {
+        is_byok: false,
         prompt_tokens: 20,
         total_tokens: 25,
         completion_tokens: 5,
@@ -1576,6 +1577,7 @@ describe('doStream', () => {
             reasoning: 0,
           },
           raw: {
+            is_byok: false,
             prompt_tokens: 17,
             total_tokens: 244,
             completion_tokens: 227,
@@ -2234,6 +2236,7 @@ describe('doStream', () => {
             reasoning: 0,
           },
           raw: {
+            is_byok: false,
             prompt_tokens: 53,
             completion_tokens: 17,
             total_tokens: 70,
@@ -2352,6 +2355,7 @@ describe('doStream', () => {
             reasoning: 0,
           },
           raw: {
+            is_byok: false,
             prompt_tokens: 53,
             completion_tokens: 17,
             total_tokens: 70,
@@ -2813,6 +2817,7 @@ describe('doStream', () => {
             reasoning: 0,
           },
           raw: {
+            is_byok: false,
             prompt_tokens: 53,
             completion_tokens: 17,
             total_tokens: 70,

@@ -485,6 +485,7 @@ export class OpenRouterChatLanguageModel implements LanguageModelV3 {
               ? fileAnnotations
               : undefined,
           usage: {
+            isByok: response.usage?.is_byok,
             promptTokens: usageInfo.inputTokens.total ?? 0,
             completionTokens: usageInfo.outputTokens.total ?? 0,
             totalTokens:
