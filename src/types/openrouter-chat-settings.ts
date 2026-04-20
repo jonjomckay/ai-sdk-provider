@@ -1,4 +1,16 @@
 import type { OpenRouterSharedSettings } from '..';
+import type {
+  DataCollection,
+  Engine,
+  IdAutoRouter,
+  IdFileParser,
+  IdModeration,
+  IdResponseHealing,
+  IdWeb,
+  PdfEngine,
+  ProviderSort,
+  Quantization,
+} from './openrouter-api-types';
 
 // https://openrouter.ai/api/v1/models
 export type OpenRouterChatModelId = string;
@@ -20,10 +32,10 @@ token from being generated.
 */
   logitBias?: Record<number, number>;
 
-  /**s
+  /**
 Return the log probabilities of the tokens. Including logprobs will increase
 the response size and can slow down response times. However, it can
-be useful to better understand how the model is behaving.
+be useful to understand better how the model is behaving.
 
 Setting to true will return the log probabilities of the tokens that
 were generated.
@@ -43,4 +55,159 @@ A unique identifier representing your end-user, which can help OpenRouter to
 monitor and detect abuse. Learn more.
 */
   user?: string;
+
+  /**
+   * Plugin configurations for enabling various capabilities
+   */
+  plugins?: Array<
+    | {
+        id: IdWeb;
+        max_results?: number;
+        search_prompt?: string;
+        engine?: Engine;
+      }
+    | {
+        id: IdFileParser;
+        max_files?: number;
+        pdf?: {
+          engine?: PdfEngine;
+        };
+      }
+    | {
+        id: IdModeration;
+      }
+    | {
+        /**
+         * Response healing plugin - automatically validates and repairs malformed JSON responses.
+         *
+         * **Important:** This plugin only works with non-streaming requests (e.g., `generateObject`).
+         * It has no effect when used with streaming methods like `streamObject` or `streamText`.
+         * The plugin activates when using `response_format` with `json_schema` or `json_object`.
+         *
+         * @see https://openrouter.ai/docs/guides/features/plugins/response-healing
+         */
+        id: IdResponseHealing;
+      }
+    | {
+        /**
+         * Auto-router plugin - configures allowed models when using `openrouter/auto`.
+         *
+         * Use wildcard patterns to restrict which models the auto router can select from.
+         * When no `allowed_models` are specified, the auto router uses all supported models.
+         *
+         * @see https://openrouter.ai/docs/guides/routing/routers/auto-router
+         */
+        id: IdAutoRouter;
+        allowed_models?: string[];
+      }
+  >;
+
+  /**
+   * Built-in web search options for models that support native web search
+   */
+  web_search_options?: {
+    /**
+     * Maximum number of search results to include
+     */
+    max_results?: number;
+    /**
+     * Custom search prompt to guide the search query
+     */
+    search_prompt?: string;
+    /**
+     * Search engine to use for web search
+     * - "native": Use provider's built-in web search
+     * - "exa": Use Exa's search API
+     * - undefined: Native if supported, otherwise Exa
+     * @see https://openrouter.ai/docs/features/web-search
+     */
+    engine?: Engine;
+  };
+
+  /**
+   * Enable Anthropic automatic prompt caching by setting a top-level cache_control
+   * directive on the request body. When set to `{ type: 'ephemeral' }`, Anthropic
+   * will automatically cache eligible content in your prompts.
+   *
+   * Only works with Anthropic models through OpenRouter.
+   *
+   * @see https://platform.claude.com/docs/en/build-with-claude/prompt-caching#automatic-caching
+   * @see https://openrouter.ai/docs
+   */
+  cache_control?: {
+    type: 'ephemeral';
+    /**
+     * Optional time-to-live for the cache entry.
+     * - `'5m'` — 5 minutes (default when omitted)
+     * - `'1h'` — 1 hour
+     */
+    ttl?: '5m' | '1h';
+  };
+
+  /**
+   * Debug options for troubleshooting API requests.
+   * Only works with streaming requests.
+   * @see https://openrouter.ai/docs/api-reference/debugging
+   */
+  debug?: {
+    /**
+     * When true, echoes back the request body that was sent to the upstream provider.
+     * The debug data will be returned as the first chunk in the stream with a `debug.echo_upstream_body` field.
+     * Sensitive data like user IDs and base64 content will be redacted.
+     */
+    echo_upstream_body?: boolean;
+  };
+
+  /**
+   * Provider routing preferences to control request routing behavior
+   */
+  provider?: {
+    /**
+     * List of provider slugs to try in order (e.g. ["anthropic", "openai"])
+     */
+    order?: string[];
+    /**
+     * Whether to allow backup providers when primary is unavailable (default: true)
+     */
+    allow_fallbacks?: boolean;
+    /**
+     * Only use providers that support all parameters in your request (default: false)
+     */
+    require_parameters?: boolean;
+    /**
+     * Control whether to use providers that may store data
+     */
+    data_collection?: DataCollection;
+    /**
+     * List of provider slugs to allow for this request
+     */
+    only?: string[];
+    /**
+     * List of provider slugs to skip for this request
+     */
+    ignore?: string[];
+    /**
+     * List of quantization levels to filter by (e.g. ["int4", "int8"])
+     */
+    quantizations?: Array<Quantization>;
+    /**
+     * Sort providers by price, throughput, or latency
+     */
+    sort?: ProviderSort;
+    /**
+     * Maximum pricing you want to pay for this request
+     */
+    max_price?: {
+      prompt?: number | string;
+      completion?: number | string;
+      image?: number | string;
+      audio?: number | string;
+      request?: number | string;
+    };
+    /**
+     * Whether to restrict routing to only ZDR (Zero Data Retention) endpoints.
+     * When true, only endpoints that do not retain prompts will be used.
+     */
+    zdr?: boolean;
+  };
 } & OpenRouterSharedSettings;

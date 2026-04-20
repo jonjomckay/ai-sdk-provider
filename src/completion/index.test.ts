@@ -1,12 +1,18 @@
-import type { LanguageModelV2Prompt } from '@ai-sdk/provider';
+import type {
+  LanguageModelV3Prompt,
+  LanguageModelV3StreamPart,
+} from '@ai-sdk/provider';
 
-import {
-  convertReadableStreamToArray,
-  createTestServer,
-} from '@ai-sdk/provider-utils/test';
+import { convertReadableStreamToArray } from '@ai-sdk/provider-utils/test';
+import { createTestServer } from '@ai-sdk/test-server';
+import { afterAll, afterEach, beforeAll, vi } from 'vitest';
 import { createOpenRouter } from '../provider';
 
-const TEST_PROMPT: LanguageModelV2Prompt = [
+vi.mock('@/src/version', () => ({
+  VERSION: '0.0.0-test',
+}));
+
+const TEST_PROMPT: LanguageModelV3Prompt = [
   { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
 ];
 
@@ -51,6 +57,10 @@ describe('doGenerate', () => {
     },
   });
 
+  beforeAll(() => server.server.start());
+  afterEach(() => server.server.reset());
+  afterAll(() => server.server.stop());
+
   function prepareJsonResponse({
     content = '',
     usage = {
@@ -60,12 +70,23 @@ describe('doGenerate', () => {
     },
     logprobs = null,
     finish_reason = 'stop',
+    provider,
   }: {
     content?: string;
     usage?: {
       prompt_tokens: number;
       total_tokens: number;
       completion_tokens: number;
+      cost?: number;
+      prompt_tokens_details?: {
+        cached_tokens: number;
+      };
+      completion_tokens_details?: {
+        reasoning_tokens: number;
+      };
+      cost_details?: {
+        upstream_inference_cost: number;
+      };
     };
     logprobs?: {
       tokens: string[];
@@ -73,6 +94,7 @@ describe('doGenerate', () => {
       top_logprobs: Record<string, number>[];
     } | null;
     finish_reason?: string;
+    provider?: string;
   }) {
     server.urls['https://openrouter.ai/api/v1/completions']!.response = {
       type: 'json-value',
@@ -81,6 +103,7 @@ describe('doGenerate', () => {
         object: 'text_completion',
         created: 1711363706,
         model: 'openai/gpt-3.5-turbo-instruct',
+        provider,
         choices: [
           {
             text: content,
@@ -117,11 +140,194 @@ describe('doGenerate', () => {
     });
 
     expect(usage).toStrictEqual({
-      inputTokens: 20,
-      outputTokens: 5,
-      totalTokens: 25,
-      reasoningTokens: 0,
-      cachedInputTokens: 0,
+      inputTokens: {
+        total: 20,
+        noCache: 20,
+        cacheRead: 0,
+        cacheWrite: undefined,
+      },
+      outputTokens: {
+        total: 5,
+        text: 5,
+        reasoning: 0,
+      },
+      raw: {
+        prompt_tokens: 20,
+        total_tokens: 25,
+        completion_tokens: 5,
+      },
+    });
+  });
+
+  it('should compute noCache and text from detail fields in doGenerate', async () => {
+    prepareJsonResponse({
+      content: 'Hello',
+      usage: {
+        prompt_tokens: 100,
+        total_tokens: 150,
+        completion_tokens: 50,
+        prompt_tokens_details: { cached_tokens: 20 },
+        completion_tokens_details: { reasoning_tokens: 10 },
+      },
+    });
+
+    const { usage } = await model.doGenerate({
+      prompt: TEST_PROMPT,
+    });
+
+    expect(usage.inputTokens).toStrictEqual({
+      total: 100,
+      noCache: 80,
+      cacheRead: 20,
+      cacheWrite: undefined,
+    });
+    expect(usage.outputTokens).toStrictEqual({
+      total: 50,
+      text: 40,
+      reasoning: 10,
+    });
+  });
+
+  it('should return providerMetadata with usage and provider', async () => {
+    prepareJsonResponse({
+      content: 'Hello',
+      usage: {
+        prompt_tokens: 10,
+        total_tokens: 20,
+        completion_tokens: 10,
+        cost: 0.0001,
+      },
+      provider: 'openai',
+    });
+
+    const { providerMetadata } = await model.doGenerate({
+      prompt: TEST_PROMPT,
+    });
+
+    expect(providerMetadata).toStrictEqual({
+      openrouter: {
+        provider: 'openai',
+        usage: {
+          promptTokens: 10,
+          completionTokens: 10,
+          totalTokens: 20,
+          cost: 0.0001,
+        },
+      },
+    });
+  });
+
+  it('should omit cost from providerMetadata when undefined', async () => {
+    prepareJsonResponse({
+      content: 'Hello',
+      usage: {
+        prompt_tokens: 10,
+        total_tokens: 20,
+        completion_tokens: 10,
+      },
+      provider: 'google',
+    });
+
+    const { providerMetadata } = await model.doGenerate({
+      prompt: TEST_PROMPT,
+    });
+
+    const openrouterMetadata = providerMetadata?.openrouter as {
+      provider?: string;
+      usage?: { cost?: number };
+    };
+
+    expect(openrouterMetadata?.provider).toBe('google');
+    expect(openrouterMetadata?.usage?.cost).toBeUndefined();
+    expect('cost' in (openrouterMetadata?.usage ?? {})).toBe(false);
+  });
+
+  it('should include cost: 0 in providerMetadata when cost is zero', async () => {
+    prepareJsonResponse({
+      content: 'Hello',
+      usage: {
+        prompt_tokens: 10,
+        total_tokens: 20,
+        completion_tokens: 10,
+        cost: 0,
+      },
+      provider: 'openai',
+    });
+
+    const { providerMetadata } = await model.doGenerate({
+      prompt: TEST_PROMPT,
+    });
+
+    const openrouterMetadata = providerMetadata?.openrouter as {
+      usage?: { cost?: number };
+    };
+
+    expect(openrouterMetadata?.usage?.cost).toBe(0);
+  });
+
+  it('should default provider to empty string when not returned by API', async () => {
+    prepareJsonResponse({
+      content: 'Hello',
+      usage: {
+        prompt_tokens: 10,
+        total_tokens: 20,
+        completion_tokens: 10,
+      },
+    });
+
+    const { providerMetadata } = await model.doGenerate({
+      prompt: TEST_PROMPT,
+    });
+
+    const openrouterMetadata = providerMetadata?.openrouter as {
+      provider?: string;
+    };
+
+    expect(openrouterMetadata?.provider).toBe('');
+  });
+
+  it('should include token details in providerMetadata when provided', async () => {
+    prepareJsonResponse({
+      content: 'Hello',
+      usage: {
+        prompt_tokens: 100,
+        total_tokens: 150,
+        completion_tokens: 50,
+        prompt_tokens_details: {
+          cached_tokens: 80,
+        },
+        completion_tokens_details: {
+          reasoning_tokens: 20,
+        },
+        cost_details: {
+          upstream_inference_cost: 0.005,
+        },
+      },
+      provider: 'anthropic',
+    });
+
+    const { providerMetadata } = await model.doGenerate({
+      prompt: TEST_PROMPT,
+    });
+
+    expect(providerMetadata).toStrictEqual({
+      openrouter: {
+        provider: 'anthropic',
+        usage: {
+          promptTokens: 100,
+          completionTokens: 50,
+          totalTokens: 150,
+          promptTokensDetails: {
+            cachedTokens: 80,
+          },
+          completionTokensDetails: {
+            reasoningTokens: 20,
+          },
+          costDetails: {
+            upstreamInferenceCost: 0.005,
+          },
+        },
+      },
     });
   });
 
@@ -149,7 +355,7 @@ describe('doGenerate', () => {
         prompt: TEST_PROMPT,
       });
 
-    expect(finishReason).toStrictEqual('stop');
+    expect(finishReason).toStrictEqual({ unified: 'stop', raw: 'stop' });
   });
 
   it('should support unknown finish reason', async () => {
@@ -164,7 +370,7 @@ describe('doGenerate', () => {
         prompt: TEST_PROMPT,
       });
 
-    expect(finishReason).toStrictEqual('unknown');
+    expect(finishReason).toStrictEqual({ unified: 'other', raw: 'eos' });
   });
 
   it('should pass the model and the prompt', async () => {
@@ -215,14 +421,15 @@ describe('doGenerate', () => {
       },
     });
 
-    const requestHeaders = server.calls[0]!.requestHeaders;
+    const call = server.calls[0]!;
 
-    expect(requestHeaders).toStrictEqual({
+    expect(call.requestHeaders).toMatchObject({
       authorization: 'Bearer test-api-key',
       'content-type': 'application/json',
       'custom-provider-header': 'provider-header-value',
       'custom-request-header': 'request-header-value',
     });
+    expect(call.requestUserAgent).toContain('ai-sdk/openrouter/0.0.0-test');
   });
 });
 
@@ -232,6 +439,10 @@ describe('doStream', () => {
       response: { type: 'stream-chunks', chunks: [] },
     },
   });
+
+  beforeAll(() => server.server.start());
+  afterEach(() => server.server.reset());
+  afterAll(() => server.server.stop());
 
   function prepareStreamResponse({
     content,
@@ -248,6 +459,16 @@ describe('doStream', () => {
       prompt_tokens: number;
       total_tokens: number;
       completion_tokens: number;
+      prompt_tokens_details?: {
+        cached_tokens: number;
+      };
+      completion_tokens_details?: {
+        reasoning_tokens: number;
+      };
+      cost?: number;
+      cost_details?: {
+        upstream_inference_cost: number;
+      };
     };
     logprobs?: {
       tokens: string[];
@@ -298,26 +519,155 @@ describe('doStream', () => {
       { type: 'text-delta', delta: '', id: expect.any(String) },
       {
         type: 'finish',
-        finishReason: 'stop',
+        finishReason: { unified: 'stop', raw: 'stop' },
         providerMetadata: {
           openrouter: {
             usage: {
               promptTokens: 10,
               completionTokens: 362,
               totalTokens: 372,
-              cost: undefined,
             },
           },
         },
         usage: {
-          inputTokens: 10,
-          outputTokens: 362,
-          totalTokens: 372,
-          reasoningTokens: Number.NaN,
-          cachedInputTokens: Number.NaN,
+          inputTokens: {
+            total: 10,
+            noCache: 10,
+            cacheRead: 0,
+            cacheWrite: undefined,
+          },
+          outputTokens: {
+            total: 362,
+            text: 362,
+            reasoning: 0,
+          },
+          raw: {
+            prompt_tokens: 10,
+            completion_tokens: 362,
+            total_tokens: 372,
+          },
         },
       },
     ]);
+  });
+
+  it('should compute noCache and text from detail fields in doStream', async () => {
+    prepareStreamResponse({
+      content: ['Hello'],
+      usage: {
+        prompt_tokens: 100,
+        total_tokens: 150,
+        completion_tokens: 50,
+        prompt_tokens_details: { cached_tokens: 20 },
+        completion_tokens_details: { reasoning_tokens: 10 },
+      },
+    });
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+    });
+
+    const elements = (await convertReadableStreamToArray(
+      stream,
+    )) as LanguageModelV3StreamPart[];
+    const finishChunk = elements.find(
+      (
+        element,
+      ): element is Extract<LanguageModelV3StreamPart, { type: 'finish' }> =>
+        element.type === 'finish',
+    );
+
+    expect(finishChunk?.usage?.inputTokens).toStrictEqual({
+      total: 100,
+      noCache: 80,
+      cacheRead: 20,
+      cacheWrite: undefined,
+    });
+    expect(finishChunk?.usage?.outputTokens).toStrictEqual({
+      total: 50,
+      text: 40,
+      reasoning: 10,
+    });
+  });
+
+  it('should include upstream inference cost when provided', async () => {
+    prepareStreamResponse({
+      content: ['Hello'],
+      usage: {
+        prompt_tokens: 5,
+        total_tokens: 15,
+        completion_tokens: 10,
+        cost_details: {
+          upstream_inference_cost: 0.0036,
+        },
+      },
+    });
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+    });
+
+    const elements = (await convertReadableStreamToArray(
+      stream,
+    )) as LanguageModelV3StreamPart[];
+    const finishChunk = elements.find(
+      (
+        element,
+      ): element is Extract<LanguageModelV3StreamPart, { type: 'finish' }> =>
+        element.type === 'finish',
+    );
+    const openrouterUsage = (
+      finishChunk?.providerMetadata?.openrouter as {
+        usage?: {
+          cost?: number;
+          costDetails?: { upstreamInferenceCost: number };
+        };
+      }
+    )?.usage;
+    expect(openrouterUsage?.costDetails).toStrictEqual({
+      upstreamInferenceCost: 0.0036,
+    });
+  });
+
+  it('should handle both normal cost and upstream inference cost in finish metadata when both are provided', async () => {
+    prepareStreamResponse({
+      content: ['Hello'],
+      usage: {
+        prompt_tokens: 5,
+        total_tokens: 15,
+        completion_tokens: 10,
+        cost: 0.0025,
+        cost_details: {
+          upstream_inference_cost: 0.0036,
+        },
+      },
+    });
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+    });
+
+    const elements = (await convertReadableStreamToArray(
+      stream,
+    )) as LanguageModelV3StreamPart[];
+    const finishChunk = elements.find(
+      (
+        element,
+      ): element is Extract<LanguageModelV3StreamPart, { type: 'finish' }> =>
+        element.type === 'finish',
+    );
+    const openrouterUsage = (
+      finishChunk?.providerMetadata?.openrouter as {
+        usage?: {
+          cost?: number;
+          costDetails?: { upstreamInferenceCost: number };
+        };
+      }
+    )?.usage;
+    expect(openrouterUsage?.costDetails).toStrictEqual({
+      upstreamInferenceCost: 0.0036,
+    });
+    expect(openrouterUsage?.cost).toBe(0.0025);
   });
 
   it('should handle error stream parts', async () => {
@@ -348,7 +698,7 @@ describe('doStream', () => {
         },
       },
       {
-        finishReason: 'error',
+        finishReason: { unified: 'error', raw: undefined },
         providerMetadata: {
           openrouter: {
             usage: {},
@@ -356,11 +706,18 @@ describe('doStream', () => {
         },
         type: 'finish',
         usage: {
-          inputTokens: Number.NaN,
-          outputTokens: Number.NaN,
-          totalTokens: Number.NaN,
-          reasoningTokens: Number.NaN,
-          cachedInputTokens: Number.NaN,
+          inputTokens: {
+            total: undefined,
+            noCache: undefined,
+            cacheRead: undefined,
+            cacheWrite: undefined,
+          },
+          outputTokens: {
+            total: undefined,
+            text: undefined,
+            reasoning: undefined,
+          },
+          raw: undefined,
         },
       },
     ]);
@@ -381,7 +738,7 @@ describe('doStream', () => {
     expect(elements.length).toBe(2);
     expect(elements[0]?.type).toBe('error');
     expect(elements[1]).toStrictEqual({
-      finishReason: 'error',
+      finishReason: { unified: 'error', raw: undefined },
       providerMetadata: {
         openrouter: {
           usage: {},
@@ -389,11 +746,18 @@ describe('doStream', () => {
       },
       type: 'finish',
       usage: {
-        inputTokens: Number.NaN,
-        outputTokens: Number.NaN,
-        totalTokens: Number.NaN,
-        reasoningTokens: Number.NaN,
-        cachedInputTokens: Number.NaN,
+        inputTokens: {
+          total: undefined,
+          noCache: undefined,
+          cacheRead: undefined,
+          cacheWrite: undefined,
+        },
+        outputTokens: {
+          total: undefined,
+          text: undefined,
+          reasoning: undefined,
+        },
+        raw: undefined,
       },
     });
   });
@@ -430,14 +794,15 @@ describe('doStream', () => {
       },
     });
 
-    const requestHeaders = server.calls[0]!.requestHeaders;
+    const call = server.calls[0]!;
 
-    expect(requestHeaders).toStrictEqual({
+    expect(call.requestHeaders).toMatchObject({
       authorization: 'Bearer test-api-key',
       'content-type': 'application/json',
       'custom-provider-header': 'provider-header-value',
       'custom-request-header': 'request-header-value',
     });
+    expect(call.requestUserAgent).toContain('ai-sdk/openrouter/0.0.0-test');
   });
 
   it('should pass extra body', async () => {
@@ -466,5 +831,128 @@ describe('doStream', () => {
       'providers.anthropic.custom_field',
       'custom_value',
     );
+  });
+});
+
+describe('includeRawChunks', () => {
+  const server = createTestServer({
+    'https://openrouter.ai/api/v1/completions': {
+      response: { type: 'stream-chunks', chunks: [] },
+    },
+  });
+
+  beforeAll(() => server.server.start());
+  afterEach(() => server.server.reset());
+  afterAll(() => server.server.stop());
+
+  function prepareStreamResponse({ content }: { content: string[] }) {
+    server.urls['https://openrouter.ai/api/v1/completions']!.response = {
+      type: 'stream-chunks',
+      chunks: [
+        ...content.map(
+          (text) =>
+            `data: {"id":"cmpl-test","object":"text_completion","created":1711363440,"choices":[{"text":"${text}","index":0,"logprobs":null,"finish_reason":null}],"model":"openai/gpt-3.5-turbo-instruct"}\n\n`,
+        ),
+        `data: {"id":"cmpl-test","object":"text_completion","created":1711363310,"choices":[{"text":"","index":0,"logprobs":null,"finish_reason":"stop"}],"model":"openai/gpt-3.5-turbo-instruct"}\n\n`,
+        `data: {"id":"cmpl-test","object":"text_completion","created":1711363310,"model":"openai/gpt-3.5-turbo-instruct","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15},"choices":[]}\n\n`,
+        'data: [DONE]\n\n',
+      ],
+    };
+  }
+
+  it('should emit raw chunks when includeRawChunks is true', async () => {
+    prepareStreamResponse({ content: ['Hello'] });
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+      includeRawChunks: true,
+    });
+
+    const elements = await convertReadableStreamToArray(stream);
+    const rawChunks = elements.filter(
+      (chunk): chunk is Extract<LanguageModelV3StreamPart, { type: 'raw' }> =>
+        chunk.type === 'raw',
+    );
+
+    expect(rawChunks.length).toBeGreaterThan(0);
+    expect(rawChunks[0]).toHaveProperty('rawValue');
+    expect(rawChunks[0]!.rawValue).toHaveProperty('id', 'cmpl-test');
+  });
+
+  it('should not emit raw chunks when includeRawChunks is false', async () => {
+    prepareStreamResponse({ content: ['Hello'] });
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+      includeRawChunks: false,
+    });
+
+    const elements = await convertReadableStreamToArray(stream);
+    const rawChunks = elements.filter(
+      (chunk): chunk is Extract<LanguageModelV3StreamPart, { type: 'raw' }> =>
+        chunk.type === 'raw',
+    );
+
+    expect(rawChunks.length).toBe(0);
+  });
+
+  it('should not emit raw chunks when includeRawChunks is not specified', async () => {
+    prepareStreamResponse({ content: ['Hello'] });
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+    });
+
+    const elements = await convertReadableStreamToArray(stream);
+    const rawChunks = elements.filter(
+      (chunk): chunk is Extract<LanguageModelV3StreamPart, { type: 'raw' }> =>
+        chunk.type === 'raw',
+    );
+
+    expect(rawChunks.length).toBe(0);
+  });
+
+  it('should emit raw chunks for each SSE event including usage chunk', async () => {
+    prepareStreamResponse({ content: ['Hello', ' World'] });
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+      includeRawChunks: true,
+    });
+
+    const elements = await convertReadableStreamToArray(stream);
+    const rawChunks = elements.filter(
+      (chunk): chunk is Extract<LanguageModelV3StreamPart, { type: 'raw' }> =>
+        chunk.type === 'raw',
+    );
+
+    // Should have raw chunks for: Hello, World, finish_reason, usage
+    expect(rawChunks.length).toBe(4);
+  });
+
+  it('should emit raw chunk even when parsing fails (for debugging malformed responses)', async () => {
+    server.urls['https://openrouter.ai/api/v1/completions']!.response = {
+      type: 'stream-chunks',
+      chunks: ['data: {unparsable}\n\n', 'data: [DONE]\n\n'],
+    };
+
+    const { stream } = await model.doStream({
+      prompt: TEST_PROMPT,
+      includeRawChunks: true,
+    });
+
+    const elements = await convertReadableStreamToArray(stream);
+    const rawChunks = elements.filter(
+      (chunk): chunk is Extract<LanguageModelV3StreamPart, { type: 'raw' }> =>
+        chunk.type === 'raw',
+    );
+    const errorChunks = elements.filter(
+      (chunk): chunk is Extract<LanguageModelV3StreamPart, { type: 'error' }> =>
+        chunk.type === 'error',
+    );
+
+    // Raw chunk is emitted before error handling, useful for debugging
+    expect(rawChunks.length).toBe(1);
+    expect(errorChunks.length).toBe(1);
   });
 });

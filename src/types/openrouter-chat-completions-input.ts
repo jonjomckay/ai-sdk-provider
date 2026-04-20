@@ -1,3 +1,4 @@
+import type { FileAnnotation } from '@/src/schemas/provider-metadata';
 import type { ReasoningDetailUnion } from '@/src/schemas/reasoning-details';
 
 // Type for OpenRouter Cache Control following Anthropic's pattern
@@ -13,8 +14,7 @@ export type ChatCompletionMessageParam =
 
 export interface ChatCompletionSystemMessageParam {
   role: 'system';
-  content: string;
-  cache_control?: OpenRouterCacheControl;
+  content: Array<ChatCompletionContentPartText>;
 }
 
 export interface ChatCompletionUserMessageParam {
@@ -26,13 +26,16 @@ export interface ChatCompletionUserMessageParam {
 export type ChatCompletionContentPart =
   | ChatCompletionContentPartText
   | ChatCompletionContentPartImage
-  | ChatCompletionContentPartFile;
+  | ChatCompletionContentPartFile
+  | ChatCompletionContentPartInputAudio
+  | ChatCompletionContentPartVideo;
 
 export interface ChatCompletionContentPartFile {
   type: 'file';
   file: {
-    filename: string;
-    file_data: string;
+    filename?: string;
+    file_data?: string;
+    file_id?: string;
   };
   cache_control?: OpenRouterCacheControl;
 }
@@ -52,11 +55,45 @@ export interface ChatCompletionContentPartText {
   cache_control?: OpenRouterCacheControl;
 }
 
+/** https://openrouter.ai/docs/guides/overview/multimodal/videos */
+export interface ChatCompletionContentPartVideo {
+  type: 'video_url';
+  video_url: {
+    url: string;
+  };
+  cache_control?: OpenRouterCacheControl;
+}
+
+/** https://openrouter.ai/docs/guides/overview/multimodal/audio */
+export const OPENROUTER_AUDIO_FORMATS = [
+  'wav',
+  'mp3',
+  'aiff',
+  'aac',
+  'ogg',
+  'flac',
+  'm4a',
+  'pcm16',
+  'pcm24',
+] as const;
+
+export type OpenRouterAudioFormat = (typeof OPENROUTER_AUDIO_FORMATS)[number];
+
+export interface ChatCompletionContentPartInputAudio {
+  type: 'input_audio';
+  input_audio: {
+    data: string;
+    format: OpenRouterAudioFormat;
+  };
+  cache_control?: OpenRouterCacheControl;
+}
+
 export interface ChatCompletionAssistantMessageParam {
   role: 'assistant';
   content?: string | null;
   reasoning?: string | null;
   reasoning_details?: ReasoningDetailUnion[];
+  annotations?: FileAnnotation[];
   tool_calls?: Array<ChatCompletionMessageToolCall>;
   cache_control?: OpenRouterCacheControl;
 }
@@ -72,7 +109,8 @@ export interface ChatCompletionMessageToolCall {
 
 export interface ChatCompletionToolMessageParam {
   role: 'tool';
-  content: string;
+  content: string | Array<ChatCompletionContentPart>;
   tool_call_id: string;
+  name?: string;
   cache_control?: OpenRouterCacheControl;
 }

@@ -1,6 +1,10 @@
-import type { LanguageModelV2, LanguageModelV2Prompt } from '@ai-sdk/provider';
+import type { LanguageModelV3, LanguageModelV3Prompt } from '@ai-sdk/provider';
 
-export type { LanguageModelV2, LanguageModelV2Prompt };
+export type { LanguageModelV3, LanguageModelV3Prompt };
+
+export * from './openrouter-embedding-settings';
+export * from './openrouter-image-settings';
+export * from './openrouter-video-settings';
 
 export type OpenRouterProviderOptions = {
   models?: string[];
@@ -18,7 +22,7 @@ export type OpenRouterProviderOptions = {
         max_tokens: number;
       }
     | {
-        effort: 'high' | 'medium' | 'low';
+        effort: 'xhigh' | 'high' | 'medium' | 'low' | 'minimal' | 'none';
       }
   );
 
@@ -47,6 +51,46 @@ export type OpenRouterSharedSettings = OpenRouterProviderOptions & {
      */
     include: boolean;
   };
+
+  /**
+   * Default temperature for model calls. Controls randomness in the output.
+   * Can be overridden at call time via generateText/streamText options.
+   * Range: 0 to 2, where 0 is deterministic and higher values are more random.
+   */
+  temperature?: number;
+
+  /**
+   * Default top-p (nucleus sampling) for model calls.
+   * Can be overridden at call time via generateText/streamText options.
+   * Range: 0 to 1.
+   */
+  topP?: number;
+
+  /**
+   * Default top-k sampling for model calls.
+   * Can be overridden at call time via generateText/streamText options.
+   */
+  topK?: number;
+
+  /**
+   * Default frequency penalty for model calls.
+   * Can be overridden at call time via generateText/streamText options.
+   * Range: -2 to 2.
+   */
+  frequencyPenalty?: number;
+
+  /**
+   * Default presence penalty for model calls.
+   * Can be overridden at call time via generateText/streamText options.
+   * Range: -2 to 2.
+   */
+  presencePenalty?: number;
+
+  /**
+   * Default maximum number of tokens to generate.
+   * Can be overridden at call time via generateText/streamText options.
+   */
+  maxTokens?: number;
 };
 
 /**
@@ -64,7 +108,7 @@ export type OpenRouterUsageAccounting = {
   };
   totalTokens: number;
   cost?: number;
-  costDetails: {
+  costDetails?: {
     upstreamInferenceCost: number;
   };
 };

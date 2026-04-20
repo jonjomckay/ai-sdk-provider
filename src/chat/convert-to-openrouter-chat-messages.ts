@@ -1,24 +1,36 @@
 import type {
-  LanguageModelV2FilePart,
-  LanguageModelV2Prompt,
-  LanguageModelV2TextPart,
-  LanguageModelV2ToolResultPart,
-  SharedV2ProviderMetadata,
+  LanguageModelV3FilePart,
+  LanguageModelV3Prompt,
+  LanguageModelV3TextPart,
+  LanguageModelV3ToolResultOutput,
+  LanguageModelV3ToolResultPart,
+  SharedV3ProviderMetadata,
 } from '@ai-sdk/provider';
-import type { ReasoningDetailUnion } from '@/src/schemas/reasoning-details';
+import type { ReasoningDetailUnion } from '../schemas/reasoning-details';
 import type {
   ChatCompletionContentPart,
   OpenRouterChatCompletionsInput,
 } from '../types/openrouter-chat-completions-input';
 
-import { convertUint8ArrayToBase64 } from '@ai-sdk/provider-utils';
-import { ReasoningDetailType } from '@/src/schemas/reasoning-details';
+import { DEFAULT_REASONING_FORMAT, ReasoningFormat } from '../schemas/format';
+import { OpenRouterProviderOptionsSchema } from '../schemas/provider-metadata';
+import { ReasoningDetailType } from '../schemas/reasoning-details';
+import { deterministicStringify } from '../utils/deterministic-stringify';
+import { ReasoningDetailsDuplicateTracker } from '../utils/reasoning-details-duplicate-tracker';
+import {
+  buildFileDataUrl,
+  getBase64FromDataUrl,
+  getFileUrl,
+  getInputAudioData,
+  MIME_TO_FORMAT,
+} from './file-url-utils';
+import { isUrl } from './is-url';
 
 // Type for OpenRouter Cache Control following Anthropic's pattern
 export type OpenRouterCacheControl = { type: 'ephemeral' };
 
 function getCacheControl(
-  providerMetadata: SharedV2ProviderMetadata | undefined,
+  providerMetadata: SharedV3ProviderMetadata | undefined,
 ): OpenRouterCacheControl | undefined {
   const anthropic = providerMetadata?.anthropic;
   const openrouter = providerMetadata?.openrouter;
@@ -31,16 +43,29 @@ function getCacheControl(
 }
 
 export function convertToOpenRouterChatMessages(
-  prompt: LanguageModelV2Prompt,
+  prompt: LanguageModelV3Prompt,
 ): OpenRouterChatCompletionsInput {
   const messages: OpenRouterChatCompletionsInput = [];
+
+  // Track reasoning_details across all messages in this conversion to prevent duplicates.
+  // This fixes issue #254 where the same reasoning ID appears in multiple
+  // assistant messages during multi-turn conversations, causing the API
+  // to reject the request with "Duplicate item found with id" error.
+  const reasoningDetailsTracker = new ReasoningDetailsDuplicateTracker();
+
   for (const { role, content, providerOptions } of prompt) {
     switch (role) {
       case 'system': {
+        const cacheControl = getCacheControl(providerOptions);
         messages.push({
           role: 'system',
-          content,
-          cache_control: getCacheControl(providerOptions),
+          content: [
+            {
+              type: 'text' as const,
+              text: content,
+              ...(cacheControl && { cache_control: cacheControl }),
+            },
+          ],
         });
         break;
       }
@@ -69,57 +94,114 @@ export function convertToOpenRouterChatMessages(
 
         // Get message level cache control
         const messageCacheControl = getCacheControl(providerOptions);
+
+        // Find the index of the last text part for applying message-level cache control
+        let lastTextPartIndex = -1;
+        for (let i = content.length - 1; i >= 0; i--) {
+          if (content[i]?.type === 'text') {
+            lastTextPartIndex = i;
+            break;
+          }
+        }
+
         const contentParts: ChatCompletionContentPart[] = content.map(
-          (part: LanguageModelV2TextPart | LanguageModelV2FilePart) => {
+          (part: LanguageModelV3TextPart | LanguageModelV3FilePart, index) => {
+            const isLastTextPart =
+              part.type === 'text' && index === lastTextPartIndex;
+            const partCacheControl = getCacheControl(part.providerOptions);
+
             const cacheControl =
-              getCacheControl(part.providerOptions) ?? messageCacheControl;
+              part.type === 'text'
+                ? (partCacheControl ??
+                  (isLastTextPart ? messageCacheControl : undefined))
+                : partCacheControl;
 
             switch (part.type) {
               case 'text':
                 return {
                   type: 'text' as const,
                   text: part.text,
-                  // For text parts, only use part-specific cache control
-                  cache_control: cacheControl,
+                  ...(cacheControl && { cache_control: cacheControl }),
                 };
-              case 'file':
+              case 'file': {
                 if (part.mediaType?.startsWith('image/')) {
+                  const url = getFileUrl({
+                    part,
+                    defaultMediaType: 'image/jpeg',
+                  });
                   return {
                     type: 'image_url' as const,
                     image_url: {
-                      url:
-                        part.data instanceof URL
-                          ? part.data.toString()
-                          : `data:${part.mediaType ?? 'image/jpeg'};base64,${convertUint8ArrayToBase64(
-                              part.data instanceof Uint8Array
-                                ? part.data
-                                : new Uint8Array(),
-                            )}`,
+                      url,
                     },
-                    // For image parts, use part-specific or message-level cache control
-                    cache_control: cacheControl,
+                    ...(cacheControl && { cache_control: cacheControl }),
                   };
                 }
+
+                // Handle video files for video_url format
+                if (part.mediaType?.startsWith('video/')) {
+                  const url = getFileUrl({
+                    part,
+                    defaultMediaType: 'video/mp4',
+                  });
+                  return {
+                    type: 'video_url' as const,
+                    video_url: {
+                      url,
+                    },
+                    ...(cacheControl && { cache_control: cacheControl }),
+                  };
+                }
+
+                // Handle audio files for input_audio format
+                if (part.mediaType?.startsWith('audio/')) {
+                  return {
+                    type: 'input_audio' as const,
+                    input_audio: getInputAudioData(part),
+                    ...(cacheControl && { cache_control: cacheControl }),
+                  };
+                }
+
+                const fileName = String(
+                  part.providerOptions?.openrouter?.filename ??
+                    part.filename ??
+                    '',
+                );
+
+                const fileData = getFileUrl({
+                  part,
+                  defaultMediaType: 'application/pdf',
+                });
+
+                if (
+                  isUrl({
+                    url: fileData,
+                    protocols: new Set(['http:', 'https:'] as const),
+                  })
+                ) {
+                  return {
+                    type: 'file' as const,
+                    file: {
+                      filename: fileName,
+                      file_data: fileData,
+                    },
+                  } satisfies ChatCompletionContentPart;
+                }
+
                 return {
                   type: 'file' as const,
                   file: {
-                    filename: String(
-                      part.providerOptions?.openrouter?.filename ??
-                        part.filename ??
-                        '',
-                    ),
-                    file_data:
-                      part.data instanceof Uint8Array
-                        ? `data:${part.mediaType};base64,${convertUint8ArrayToBase64(part.data)}`
-                        : `data:${part.mediaType};base64,${part.data}`,
+                    filename: fileName,
+                    file_data: fileData,
                   },
-                  cache_control: cacheControl,
-                };
+                  ...(cacheControl && { cache_control: cacheControl }),
+                } satisfies ChatCompletionContentPart;
+              }
               default: {
                 return {
                   type: 'text' as const,
                   text: '',
-                  cache_control: cacheControl,
+                  ...(cacheControl && { cache_control: cacheControl }),
                 };
               }
             }
@@ -138,7 +220,6 @@ export function convertToOpenRouterChatMessages(
       case 'assistant': {
         let text = '';
         let reasoning = '';
-        const reasoningDetails: ReasoningDetailUnion[] = [];
         const toolCalls: Array<{
           id: string;
           type: 'function';
@@ -157,21 +238,15 @@ export function convertToOpenRouterChatMessages(
                 type: 'function',
                 function: {
                   name: part.toolName,
-                  arguments: JSON.stringify(part.input),
+                  arguments: deterministicStringify(part.input),
                 },
               });
               break;
             }
             case 'reasoning': {
               reasoning += part.text;
-              reasoningDetails.push({
-                type: ReasoningDetailType.Text,
-                text: part.text,
-              });
-
               break;
             }
-
             case 'file':
               break;
             default: {
@@ -180,13 +255,113 @@ export function convertToOpenRouterChatMessages(
           }
         }
 
+        // Check message-level providerOptions for preserved reasoning_details and annotations
+        const parsedProviderOptions =
+          OpenRouterProviderOptionsSchema.safeParse(providerOptions);
+        const messageReasoningDetails = parsedProviderOptions.success
+          ? parsedProviderOptions.data?.openrouter?.reasoning_details
+          : undefined;
+        const messageAnnotations = parsedProviderOptions.success
+          ? parsedProviderOptions.data?.openrouter?.annotations
+          : undefined;
+
+        // Use message-level reasoning_details if available, otherwise find from parts
+        // Priority: message-level > first tool call > first reasoning part
+        // This prevents duplicate thinking blocks when Claude makes parallel tool calls
+        const candidateReasoningDetails =
+          messageReasoningDetails &&
+          Array.isArray(messageReasoningDetails) &&
+          messageReasoningDetails.length > 0
+            ? messageReasoningDetails
+            : findFirstReasoningDetails(content);
+
+        // Strip reasoning.text entries that would cause signature errors
+        // when sent back to the upstream provider.
+        //
+        // Anthropic (issue #423): Uses an explicit `signature` field on
+        // reasoning.text entries. When the signature is lost during message
+        // serialization, custom pruning, or DB storage, sending the entry
+        // back causes "Invalid signature in thinking block".
+        //
+        // Google Gemini (issue #418): Does NOT use the SDK `signature`
+        // field, but Google internally signs thought tokens. When
+        // reasoning text is modified during roundtripping (serialization,
+        // encoding changes, field reordering), Google rejects with
+        // "Corrupted thought signature". Since the SDK cannot verify
+        // whether the text is intact, Gemini reasoning.text entries are
+        // always stripped on roundtrip — the encrypted reasoning blob
+        // (reasoning.encrypted) handles multi-turn continuity instead.
+        //
+        // Other formats (OpenAI, xAI, Azure) and non-text detail types
+        // pass through unchanged.
+        //
+        // This runs BEFORE deduplication so that signatureless entries are
+        // never registered in the tracker — otherwise a signatureless entry
+        // in an earlier turn would suppress a valid signed copy in a later turn.
+        let finalReasoningDetails: ReasoningDetailUnion[] | undefined;
+        if (candidateReasoningDetails && candidateReasoningDetails.length > 0) {
+          const validDetails = candidateReasoningDetails.filter((detail) => {
+            if (detail.type !== ReasoningDetailType.Text) {
+              return true;
+            }
+            const format = detail.format ?? DEFAULT_REASONING_FORMAT;
+            if (
+              format !== ReasoningFormat.AnthropicClaudeV1 &&
+              format !== ReasoningFormat.GoogleGeminiV1
+            ) {
+              return true;
+            }
+            return !!detail.signature;
+          });
+
+          if (validDetails.length < candidateReasoningDetails.length) {
+            // Respect the AI SDK's warning suppression system.
+            // When false, warnings are fully suppressed.
+            // When a function, the app has a custom handler — suppress
+            // console output since our plain-text warning doesn't match
+            // the structured format the handler expects.
+            const logger = globalThis.AI_SDK_LOG_WARNINGS;
+            if (logger !== false && typeof logger !== 'function') {
+              // biome-ignore lint/suspicious/noConsole: intentional warning for stripped reasoning data
+              console.warn(
+                '[openrouter] Some reasoning_details entries were removed because they were missing signatures. See https://github.com/OpenRouterTeam/ai-sdk-provider/issues/423 and https://github.com/OpenRouterTeam/ai-sdk-provider/issues/418 for more details.',
+              );
+            }
+          }
+
+          // Deduplicate reasoning_details across all messages to prevent
+          // "Duplicate item found with id" errors in multi-turn conversations.
+          // upsert() returns true only for NEW details (not seen before and has valid key).
+          // Details without valid keys or duplicates are skipped.
+          const uniqueDetails: ReasoningDetailUnion[] = [];
+          for (const detail of validDetails) {
+            if (reasoningDetailsTracker.upsert(detail)) {
+              uniqueDetails.push(detail);
+            }
+          }
+          finalReasoningDetails =
+            uniqueDetails.length > 0 ? uniqueDetails : undefined;
+        }
+
+        // Only include reasoning text if we have valid reasoning_details.
+        // When providerMetadata is lost during message serialization or
+        // custom pruning (e.g., stripping providerOptions from reasoning
+        // parts), or when switching between models mid-conversation,
+        // reasoning text may exist without corresponding reasoning_details.
+        // Sending reasoning without reasoning_details causes the API to
+        // construct thinking blocks without valid signatures, which
+        // Anthropic rejects with "Invalid signature in thinking block"
+        // (issue #423).
+        const effectiveReasoning =
+          reasoning && finalReasoningDetails ? reasoning : undefined;
+
         messages.push({
           role: 'assistant',
           content: text,
           tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-          reasoning: reasoning || undefined,
-          reasoning_details:
-            reasoningDetails.length > 0 ? reasoningDetails : undefined,
+          reasoning: effectiveReasoning,
+          reasoning_details: finalReasoningDetails,
+          annotations: messageAnnotations,
           cache_control: getCacheControl(providerOptions),
         });
 
@@ -195,12 +370,17 @@ export function convertToOpenRouterChatMessages(
 
       case 'tool': {
         for (const toolResponse of content) {
+          // Skip tool approval responses - only process tool results
+          if (toolResponse.type === 'tool-approval-response') {
+            continue;
+          }
           const content = getToolResultContent(toolResponse);
 
           messages.push({
             role: 'tool',
             tool_call_id: toolResponse.toolCallId,
             content,
+            name: toolResponse.toolName,
             cache_control:
               getCacheControl(providerOptions) ??
               getCacheControl(toolResponse.providerOptions),
@@ -218,8 +398,208 @@ export function convertToOpenRouterChatMessages(
   return messages;
 }
 
-function getToolResultContent(input: LanguageModelV2ToolResultPart): string {
-  return input.output.type === 'text'
-    ? input.output.value
-    : JSON.stringify(input.output.value);
+function getToolResultContent(
+  input: LanguageModelV3ToolResultPart,
+): string | ChatCompletionContentPart[] {
+  switch (input.output.type) {
+    case 'text':
+    case 'error-text':
+      return input.output.value;
+    case 'json':
+    case 'error-json':
+      return JSON.stringify(input.output.value);
+    case 'content':
+      return mapToolResultContentParts(input.output.value);
+    case 'execution-denied':
+      return input.output.reason ?? 'Tool execution denied';
+  }
+}
+
+type ToolResultContentPart = Extract<
+  LanguageModelV3ToolResultOutput,
+  { type: 'content' }
+>['value'][number];
+
+function mapToolResultContentParts(
+  parts: ReadonlyArray<ToolResultContentPart>,
+): ChatCompletionContentPart[] {
+  return parts.map((part): ChatCompletionContentPart => {
+    switch (part.type) {
+      case 'text':
+        return { type: 'text', text: part.text };
+
+      case 'image-data':
+        return {
+          type: 'image_url',
+          image_url: {
+            url: buildFileDataUrl({
+              data: part.data,
+              mediaType: part.mediaType,
+              defaultMediaType: 'image/jpeg',
+            }),
+          },
+        };
+
+      case 'image-url':
+        return {
+          type: 'image_url',
+          image_url: { url: part.url },
+        };
+
+      case 'file-data': {
+        const dataUrl = buildFileDataUrl({
+          data: part.data,
+          mediaType: part.mediaType,
+          defaultMediaType: 'application/octet-stream',
+        });
+
+        if (part.mediaType?.startsWith('image/')) {
+          return {
+            type: 'image_url',
+            image_url: { url: dataUrl },
+          };
+        }
+
+        if (part.mediaType?.startsWith('video/')) {
+          return {
+            type: 'video_url',
+            video_url: { url: dataUrl },
+          };
+        }
+
+        if (part.mediaType?.startsWith('audio/')) {
+          const rawFormat = part.mediaType.replace('audio/', '');
+          const format = MIME_TO_FORMAT[rawFormat];
+          if (format !== undefined) {
+            return {
+              type: 'input_audio',
+              input_audio: {
+                data: getBase64FromDataUrl(dataUrl),
+                format,
+              },
+            };
+          }
+        }
+
+        return {
+          type: 'file',
+          file: {
+            filename: part.filename ?? '',
+            file_data: dataUrl,
+          },
+        };
+      }
+
+      case 'file-url': {
+        // file-url parts don't carry a mediaType field in the SDK,
+        // so we infer from the URL path extension to route correctly.
+        if (looksLikeImageUrl(part.url)) {
+          return {
+            type: 'image_url',
+            image_url: { url: part.url },
+          };
+        }
+
+        return {
+          type: 'file',
+          file: {
+            filename: filenameFromUrl(part.url),
+            file_data: part.url,
+          },
+        };
+      }
+
+      case 'file-id':
+      case 'image-file-id':
+      case 'custom':
+        return { type: 'text', text: JSON.stringify(part) };
+
+      default: {
+        const _exhaustiveCheck: never = part;
+        return { type: 'text', text: JSON.stringify(_exhaustiveCheck) };
+      }
+    }
+  });
+}
+
+const IMAGE_EXTENSIONS = new Set([
+  'jpg',
+  'jpeg',
+  'png',
+  'gif',
+  'webp',
+  'svg',
+  'bmp',
+  'ico',
+  'tif',
+  'tiff',
+  'avif',
+]);
+
+function looksLikeImageUrl(url: string): boolean {
+  try {
+    const pathname = new URL(url).pathname;
+    const ext = pathname.split('.').pop()?.toLowerCase();
+    return ext !== undefined && IMAGE_EXTENSIONS.has(ext);
+  } catch {
+    return false;
+  }
+}
+
+function filenameFromUrl(url: string): string {
+  try {
+    const pathname = new URL(url).pathname;
+    const last = pathname.split('/').pop();
+    return last?.includes('.') ? last : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Find the first reasoning_details from content parts.
+ * Priority: tool calls (complete accumulated data) > reasoning parts (delta data)
+ *
+ * This prevents duplicate thinking blocks when Claude makes parallel tool calls,
+ * as each tool call may have the same reasoning_details attached.
+ */
+function findFirstReasoningDetails(
+  content: Array<{
+    type: string;
+    providerOptions?: Record<string, unknown>;
+  }>,
+): ReasoningDetailUnion[] | undefined {
+  // First, try tool calls - they have complete accumulated reasoning_details
+  for (const part of content) {
+    if (part.type === 'tool-call') {
+      const parsed = OpenRouterProviderOptionsSchema.safeParse(
+        part.providerOptions,
+      );
+      if (
+        parsed.success &&
+        parsed.data?.openrouter?.reasoning_details &&
+        parsed.data.openrouter.reasoning_details.length > 0
+      ) {
+        return parsed.data.openrouter.reasoning_details;
+      }
+    }
+  }
+
+  // Fall back to reasoning parts - they have delta reasoning_details
+  for (const part of content) {
+    if (part.type === 'reasoning') {
+      const parsed = OpenRouterProviderOptionsSchema.safeParse(
+        part.providerOptions,
+      );
+      if (
+        parsed.success &&
+        parsed.data?.openrouter?.reasoning_details &&
+        parsed.data.openrouter.reasoning_details.length > 0
+      ) {
+        return parsed.data.openrouter.reasoning_details;
+      }
+    }
+  }
+
+  return undefined;
 }

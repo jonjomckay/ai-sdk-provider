@@ -7,10 +7,15 @@ import type {
   OpenRouterCompletionModelId,
   OpenRouterCompletionSettings,
 } from './types/openrouter-completion-settings';
+import type {
+  OpenRouterEmbeddingModelId,
+  OpenRouterEmbeddingSettings,
+} from './types/openrouter-embedding-settings';
 
 import { loadApiKey, withoutTrailingSlash } from '@ai-sdk/provider-utils';
 import { OpenRouterChatLanguageModel } from './chat';
 import { OpenRouterCompletionLanguageModel } from './completion';
+import { OpenRouterEmbeddingModel } from './embedding';
 
 /**
 @deprecated Use `createOpenRouter` instead.
@@ -23,7 +28,7 @@ The default prefix is `https://openrouter.ai/api/v1`.
   readonly baseURL: string;
 
   /**
-API key that is being send using the `Authorization` header.
+API key that is being sent using the `Authorization` header.
 It defaults to the `OPENROUTER_API_KEY` environment variable.
  */
   readonly apiKey?: string;
@@ -34,6 +39,21 @@ Custom headers to include in the requests.
   readonly headers?: Record<string, string>;
 
   /**
+   * Record of provider slugs to API keys for injecting into provider routing.
+   */
+  readonly api_keys?: Record<string, string>;
+
+  /**
+   * App display name for the `X-OpenRouter-Title` header.
+   */
+  readonly appName?: string;
+
+  /**
+   * App URL for the `HTTP-Referer` header.
+   */
+  readonly appUrl?: string;
+
+  /**
    * Creates a new OpenRouter provider instance.
    */
   constructor(options: OpenRouterProviderSettings = {}) {
@@ -42,6 +62,9 @@ Custom headers to include in the requests.
       'https://openrouter.ai/api/v1';
     this.apiKey = options.apiKey;
     this.headers = options.headers;
+    this.api_keys = options.api_keys;
+    this.appName = options.appName;
+    this.appUrl = options.appUrl;
   }
 
   private get baseConfig() {
@@ -53,7 +76,13 @@ Custom headers to include in the requests.
           environmentVariableName: 'OPENROUTER_API_KEY',
           description: 'OpenRouter',
         })}`,
+        ...(this.appName && { 'X-OpenRouter-Title': this.appName }),
+        ...(this.appUrl && { 'HTTP-Referer': this.appUrl }),
         ...this.headers,
+        ...(this.api_keys &&
+          Object.keys(this.api_keys).length > 0 && {
+            'X-Provider-API-Keys': JSON.stringify(this.api_keys),
+          }),
       }),
     };
   }
@@ -77,5 +106,26 @@ Custom headers to include in the requests.
       compatibility: 'strict',
       url: ({ path }) => `${this.baseURL}${path}`,
     });
+  }
+
+  textEmbeddingModel(
+    modelId: OpenRouterEmbeddingModelId,
+    settings: OpenRouterEmbeddingSettings = {},
+  ) {
+    return new OpenRouterEmbeddingModel(modelId, settings, {
+      provider: 'openrouter.embedding',
+      ...this.baseConfig,
+      url: ({ path }) => `${this.baseURL}${path}`,
+    });
+  }
+
+  /**
+   * @deprecated Use textEmbeddingModel instead
+   */
+  embedding(
+    modelId: OpenRouterEmbeddingModelId,
+    settings: OpenRouterEmbeddingSettings = {},
+  ) {
+    return this.textEmbeddingModel(modelId, settings);
   }
 }

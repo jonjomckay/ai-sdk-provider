@@ -1,10 +1,8 @@
 import type { OpenRouterChatSettings } from '../types/openrouter-chat-settings';
 
-import {
-  convertReadableStreamToArray,
-  createTestServer,
-} from '@ai-sdk/provider-utils/test';
-import { describe, expect, it } from 'vitest';
+import { convertReadableStreamToArray } from '@ai-sdk/provider-utils/test';
+import { createTestServer } from '@ai-sdk/test-server';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { OpenRouterChatLanguageModel } from '../chat';
 
 describe('OpenRouter Streaming Usage Accounting', () => {
@@ -13,6 +11,10 @@ describe('OpenRouter Streaming Usage Accounting', () => {
       response: { type: 'stream-chunks', chunks: [] },
     },
   });
+
+  beforeAll(() => server.server.start());
+  afterEach(() => server.server.reset());
+  afterAll(() => server.server.stop());
 
   function prepareStreamResponse(includeUsage = true) {
     const chunks = [
@@ -30,6 +32,7 @@ describe('OpenRouter Streaming Usage Accounting', () => {
             completion_tokens_details: { reasoning_tokens: 8 },
             total_tokens: 30,
             cost: 0.0015,
+            cost_details: { upstream_inference_cost: 0.0019 },
           },
           choices: [],
         })}\n\n`,
@@ -72,7 +75,10 @@ describe('OpenRouter Streaming Usage Accounting', () => {
     });
 
     // Verify stream options
-    const requestBody = await server.calls[0]!.requestBodyJson;
+    const requestBody = (await server.calls[0]!.requestBodyJson) as Record<
+      string,
+      unknown
+    >;
     expect(requestBody).toBeDefined();
     expect(requestBody.stream).toBe(true);
     expect(requestBody.stream_options).toEqual({
@@ -125,6 +131,7 @@ describe('OpenRouter Streaming Usage Accounting', () => {
       completionTokens: 20,
       totalTokens: 30,
       cost: 0.0015,
+      costDetails: { upstreamInferenceCost: 0.0019 },
       promptTokensDetails: { cachedTokens: 5 },
       completionTokensDetails: { reasoningTokens: 8 },
     });
@@ -168,5 +175,233 @@ describe('OpenRouter Streaming Usage Accounting', () => {
     expect(finishChunk?.providerMetadata?.openrouter).toStrictEqual({
       usage: {},
     });
+  });
+
+  it('should include raw usage in finish event usage.raw field with original snake_case format', async () => {
+    prepareStreamResponse(true);
+
+    const settings: OpenRouterChatSettings = {
+      usage: { include: true },
+    };
+
+    const model = new OpenRouterChatLanguageModel('test-model', settings, {
+      provider: 'openrouter.chat',
+      url: () => 'https://api.openrouter.ai/chat/completions',
+      headers: () => ({}),
+      compatibility: 'strict',
+      fetch: global.fetch,
+    });
+
+    const result = await model.doStream({
+      prompt: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+      ],
+      maxOutputTokens: 100,
+    });
+
+    const chunks = await convertReadableStreamToArray(result.stream);
+    const finishChunk = chunks.find((chunk) => chunk.type === 'finish');
+    expect(finishChunk).toBeDefined();
+
+    // Verify usage.raw contains the original snake_case format from the API
+    expect(finishChunk?.usage?.raw).toBeDefined();
+    expect(finishChunk?.usage?.raw).toMatchObject({
+      prompt_tokens: 10,
+      prompt_tokens_details: { cached_tokens: 5 },
+      completion_tokens: 20,
+      completion_tokens_details: { reasoning_tokens: 8 },
+      total_tokens: 30,
+      cost: 0.0015,
+      cost_details: { upstream_inference_cost: 0.0019 },
+    });
+  });
+
+  it('should compute inputTokens.noCache and outputTokens.text from detail fields in stream', async () => {
+    prepareStreamResponse(true);
+
+    const model = new OpenRouterChatLanguageModel(
+      'test-model',
+      {},
+      {
+        provider: 'openrouter.chat',
+        url: () => 'https://api.openrouter.ai/chat/completions',
+        headers: () => ({}),
+        compatibility: 'strict',
+        fetch: global.fetch,
+      },
+    );
+
+    const result = await model.doStream({
+      prompt: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+      ],
+    });
+
+    const chunks = await convertReadableStreamToArray(result.stream);
+    const finishChunk = chunks.find((chunk) => chunk.type === 'finish');
+
+    expect(finishChunk?.usage?.inputTokens).toStrictEqual({
+      total: 10,
+      noCache: 5,
+      cacheRead: 5,
+      cacheWrite: undefined,
+    });
+    expect(finishChunk?.usage?.outputTokens).toStrictEqual({
+      total: 20,
+      text: 12,
+      reasoning: 8,
+    });
+  });
+
+  it('should set noCache equal to total when no detail fields in stream', async () => {
+    server.urls['https://api.openrouter.ai/chat/completions']!.response = {
+      type: 'stream-chunks',
+      chunks: [
+        `data: {"id":"test-id","model":"test-model","choices":[{"delta":{"content":"Hello"},"index":0}]}\n\n`,
+        `data: {"choices":[{"finish_reason":"stop","index":0}]}\n\n`,
+        `data: ${JSON.stringify({
+          usage: {
+            prompt_tokens: 15,
+            completion_tokens: 25,
+            total_tokens: 40,
+          },
+          choices: [],
+        })}\n\n`,
+        'data: [DONE]\n\n',
+      ],
+    };
+
+    const model = new OpenRouterChatLanguageModel(
+      'test-model',
+      {},
+      {
+        provider: 'openrouter.chat',
+        url: () => 'https://api.openrouter.ai/chat/completions',
+        headers: () => ({}),
+        compatibility: 'strict',
+        fetch: global.fetch,
+      },
+    );
+
+    const result = await model.doStream({
+      prompt: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+      ],
+    });
+
+    const chunks = await convertReadableStreamToArray(result.stream);
+    const finishChunk = chunks.find((chunk) => chunk.type === 'finish');
+
+    expect(finishChunk?.usage?.inputTokens).toStrictEqual({
+      total: 15,
+      noCache: 15,
+      cacheRead: 0,
+      cacheWrite: undefined,
+    });
+    expect(finishChunk?.usage?.outputTokens).toStrictEqual({
+      total: 25,
+      text: 25,
+      reasoning: 0,
+    });
+  });
+
+  it('should pass through cache_write_tokens in stream when present', async () => {
+    server.urls['https://api.openrouter.ai/chat/completions']!.response = {
+      type: 'stream-chunks',
+      chunks: [
+        `data: {"id":"test-id","model":"test-model","choices":[{"delta":{"content":"Hello"},"index":0}]}\n\n`,
+        `data: {"choices":[{"finish_reason":"stop","index":0}]}\n\n`,
+        `data: ${JSON.stringify({
+          usage: {
+            prompt_tokens: 100,
+            prompt_tokens_details: {
+              cached_tokens: 20,
+              cache_write_tokens: 30,
+            },
+            completion_tokens: 50,
+            completion_tokens_details: { reasoning_tokens: 10 },
+            total_tokens: 150,
+          },
+          choices: [],
+        })}\n\n`,
+        'data: [DONE]\n\n',
+      ],
+    };
+
+    const model = new OpenRouterChatLanguageModel(
+      'test-model',
+      {},
+      {
+        provider: 'openrouter.chat',
+        url: () => 'https://api.openrouter.ai/chat/completions',
+        headers: () => ({}),
+        compatibility: 'strict',
+        fetch: global.fetch,
+      },
+    );
+
+    const result = await model.doStream({
+      prompt: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+      ],
+    });
+
+    const chunks = await convertReadableStreamToArray(result.stream);
+    const finishChunk = chunks.find((chunk) => chunk.type === 'finish');
+
+    expect(finishChunk?.usage?.inputTokens).toStrictEqual({
+      total: 100,
+      noCache: 80,
+      cacheRead: 20,
+      cacheWrite: 30,
+    });
+    expect(finishChunk?.usage?.outputTokens).toStrictEqual({
+      total: 50,
+      text: 40,
+      reasoning: 10,
+    });
+  });
+
+  it('should set usage.raw to undefined when no usage data in stream', async () => {
+    prepareStreamResponse(false);
+
+    const settings: OpenRouterChatSettings = {};
+
+    const model = new OpenRouterChatLanguageModel('test-model', settings, {
+      provider: 'openrouter.chat',
+      url: () => 'https://api.openrouter.ai/chat/completions',
+      headers: () => ({}),
+      compatibility: 'strict',
+      fetch: global.fetch,
+    });
+
+    const result = await model.doStream({
+      prompt: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+      ],
+      maxOutputTokens: 100,
+    });
+
+    const chunks = await convertReadableStreamToArray(result.stream);
+    const finishChunk = chunks.find((chunk) => chunk.type === 'finish');
+    expect(finishChunk).toBeDefined();
+
+    // When no usage data, raw should be undefined
+    expect(finishChunk?.usage?.raw).toBeUndefined();
   });
 });

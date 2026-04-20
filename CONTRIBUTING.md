@@ -47,14 +47,17 @@ pnpm dev
 
 ### Code Style and Formatting
 
-We use Prettier for code formatting. Before submitting a PR, make sure your code is properly formatted:
+We use Biome for code linting and formatting. Before submitting a PR, make sure your code passes all checks:
 
 ```bash
-# Check formatting
+# Check both linting and formatting
 pnpm stylecheck
 
-# Fix formatting issues
+# Fix formatting issues automatically
 pnpm format
+
+# Run linting and formatting checks
+pnpm stylecheck
 ```
 
 ### Type Checking
@@ -90,6 +93,52 @@ Examples of test files include:
 - `openrouter-usage-accounting.test.ts`
 - `openrouter-stream-usage-accounting.test.ts`
 
+### Issue-Specific Regression Tests
+
+When fixing bugs reported in GitHub issues, add a regression test to the `e2e/issues/` directory. This ensures the issue doesn't recur and provides traceability back to the original report.
+
+**Running issue regression tests:**
+```bash
+# Run issue regression tests separately (not included in test:e2e)
+pnpm test:issues
+```
+
+> **Note:** Issue regression tests are excluded from `pnpm test:e2e` because they may hit different models/APIs that could be slow or rate-limited. Run them separately when needed.
+
+**File naming convention:** `issue-{number}-{brief-description}.test.ts`
+
+**Required test file structure:**
+```typescript
+/**
+ * Regression test for GitHub issue #{number}
+ * https://github.com/OpenRouterTeam/ai-sdk-provider/issues/{number}
+ *
+ * Reported error: {exact error message from the issue}
+ * Model: {model ID if applicable}
+ *
+ * This test verifies that {what the test checks}.
+ */
+import { ... } from 'ai';
+import { describe, expect, it, vi } from 'vitest';
+import { createOpenRouter } from '@/src';
+
+describe('Issue #{number}: {brief description}', () => {
+  // Test cases that verify the issue is resolved
+});
+```
+
+> **Note:** Only include known facts from the issue report (error message, model, SDK version). Do not include speculative root cause analysis.
+
+**When to add issue regression tests:**
+- Bug fixes that have a clear reproduction case
+- Issues that could potentially regress
+- API compatibility issues with specific models or features
+
+**When NOT to add issue regression tests:**
+- Documentation-only changes
+- Issues that were user configuration errors
+- Transient API issues that were fixed server-side (though you may still add one for monitoring)
+
 ## Adding New Features
 
 When adding new features to the OpenRouter provider:
@@ -113,13 +162,38 @@ The usage accounting feature provides an example of how to add features to the p
 
 ## Pull Request Process
 
+> **Important:** All PRs that should trigger a release must include a changeset. Run `pnpm changeset` before submitting your PR.
+
 1. Create a new branch for your changes
 2. Make your changes, including tests and documentation updates
-3. Ensure all tests pass
-4. Run formatting checks and fix any issues
-5. Commit with clear, descriptive messages
-6. Push to your fork and submit a pull request
-7. Update the PR description with any relevant information
+3. **Add a changeset** to describe your changes:
+   ```bash
+   pnpm changeset
+   ```
+   This will prompt you to select the type of change (patch/minor/major) and write a summary. The changeset will be used to automatically generate release notes and bump versions.
+   
+   - **patch**: Bug fixes and small changes that don't affect the API
+   - **minor**: New features that are backwards-compatible
+   - **major**: Breaking changes
+   
+   If your changes don't need a release (docs, tests, CI config), create an empty changeset:
+   ```bash
+   pnpm changeset --empty
+   ```
+
+4. Run all checks locally before submitting:
+   ```bash
+   pnpm stylecheck    # Check formatting
+   pnpm typecheck     # Check types
+   pnpm build         # Build the project
+   pnpm test          # Run all tests
+   ```
+5. Fix any issues found by the checks (use `pnpm format` for formatting)
+6. Commit with clear, descriptive messages (including the changeset file)
+7. Push to your fork and submit a pull request
+8. Update the PR description with any relevant information
+
+**Note:** Our CI will automatically run all these checks on your PR. PRs with failing checks cannot be merged.
 
 ### PR Title Convention
 
@@ -133,7 +207,32 @@ Use a descriptive title that explains the change:
 
 ## Release Process
 
-The project maintainers will handle versioning and publishing. When your contribution is merged, it will be included in the next release.
+This project uses [Changesets](https://github.com/changesets/changesets) for automated release management.
+
+### How it works
+
+1. **Contributors add changesets**: When you submit a PR with changes that affect the public API or fix bugs, you include a changeset file (created with `pnpm changeset`) that describes your changes.
+
+2. **Automated version PR**: When PRs with changesets are merged to `main`, the Release workflow automatically creates or updates a "Version Packages" PR. This PR:
+   - Bumps the version in `package.json` based on all pending changesets
+   - Updates `CHANGELOG.md` with all changes since the last release
+   - Removes the changeset files that have been processed
+
+3. **Publish to npm**: When a maintainer merges the "Version Packages" PR, the package is automatically published to npm with provenance.
+
+### For Maintainers
+
+To release a new version:
+
+1. Review the automatically created "Version Packages" PR
+2. Verify the version bump is appropriate
+3. Verify the CHANGELOG entries are accurate
+4. Merge the PR
+5. The Release workflow will automatically publish to npm
+
+### Manual releases (emergency only)
+
+In case of emergency, a manual release can be triggered using the legacy `publish-manual.yaml` workflow by creating a GitHub Release. This should only be used when the automated process is unavailable.
 
 ## Getting Help
 
